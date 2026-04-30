@@ -1,13 +1,11 @@
-
 import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List, Optional
-from sentence_transformers import SentenceTransformer, util
+from sentence_transformers import CrossEncoder
+
 app = FastAPI()
-
-model = SentenceTransformer('all-MiniLM-L6-v2')
-
+model = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
 
 class Study(BaseModel):
     study_id: str
@@ -38,27 +36,30 @@ class Prediction(BaseModel):
 class ResponsePayload(BaseModel):
     predictions: List[Prediction]
 
-cache = {}
-def get_embedding(text: str):
-    if text not in cache:
-        cache[text] = model.encode(text, convert_to_tensor=True)
-    return cache[text]
-
 @app.post("/predict", response_model=ResponsePayload)
 async def predict(request: RequestPayload):
     predictions = []
     for case in request.cases:
         current_text = case.current_study.study_description
-        current_emb = get_embedding(current_text)
         for prior in case.prior_studies:
             prior_text = prior.study_description
             if not prior_text:
-                predictions.append(Prediction(case_id=case.case_id, study_id=prior.study_id, predicted_is_relevant=False))
+                predictions.append(Prediction(
+                    case_id=case.case_id, 
+                    study_id=prior.study_id, 
+                    predicted_is_relevant=False
+                ))
                 continue
-            prior_emb = get_embedding(prior_text)
-            similarity = util.pytorch_cos_sim(current_emb, prior_emb)[0][0].item()
-            is_relevant = similarity >= 0.80
-            predictions.append(Prediction(case_id=case.case_id, study_id=prior.study_id, predicted_is_relevant=is_relevant))
+            
+            # Cross-encoder takes a pair of texts and returns a relevance score (0-1)
+            score = model.predict([(current_text, prior_text)])[0]
+            # When score > 0.5, it's relevant
+            is_relevant = score >= 0.5
+            predictions.append(Prediction(
+                case_id=case.case_id, 
+                study_id=prior.study_id, 
+                predicted_is_relevant=is_relevant
+            ))
     return ResponsePayload(predictions=predictions)
 
 @app.get("/health")
